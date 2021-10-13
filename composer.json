@@ -1,0 +1,34 @@
+{
+    "name": "steffendietz/flysystem-phar",
+    "description": "Phar adapter for league/flysystem v2.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "flysystem",
+        "phar"
+    ],
+    "autoload": {
+        "psr-4": {
+            "Steffendietz\\Flysystem\\Phar\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Steffendietz\\Flysystem\\Phar\\Tests\\": "tests/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Steffen Dietz",
+            "email": "ich@steffendietz.de",
+            "homepage": "https://steffendietz.de"
+        }
+    ],
+    "require-dev": {
+        "league/flysystem-adapter-test-utilities": "^2.2",
+        "phpunit/phpunit": "^9.5"
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
