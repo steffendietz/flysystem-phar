@@ -1,5 +1,6 @@
 .devcontainer
 .idea
+.vscode
 .phpunit.cache
 vendor
 composer.lock
