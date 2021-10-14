@@ -16,9 +16,10 @@ class PharAdapterTest extends FilesystemAdapterTestCase
         return new PharAdapter(__DIR__ . '/test.zip');
     }
 
-    protected function tearDown(): void
+    public static function tearDownAfterClass(): void
     {
-        if(file_exists(__DIR__ . '/test.zip')) {
+        parent::tearDownAfterClass();
+        if (file_exists(__DIR__ . '/test.zip')) {
             unlink(__DIR__ . '/test.zip');
         }
     }
