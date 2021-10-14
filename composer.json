@@ -7,6 +7,22 @@
         "flysystem",
         "phar"
     ],
+    "authors": [
+        {
+            "name": "Steffen Dietz",
+            "email": "ich@steffendietz.de",
+            "homepage": "https://steffendietz.de"
+        }
+    ],
+    "require": {
+        "php": ">=7.4",
+        "league/flysystem": "^2.0",
+        "league/mime-type-detection": "^1.8"
+    },
+    "require-dev": {
+        "league/flysystem-adapter-test-utilities": "^2.2",
+        "phpunit/phpunit": "^9.5"
+    },
     "autoload": {
         "psr-4": {
             "Steffendietz\\Flysystem\\Phar\\": "src/"
@@ -16,17 +32,6 @@
         "psr-4": {
             "Steffendietz\\Flysystem\\Phar\\Tests\\": "tests/"
         }
-    },
-    "authors": [
-        {
-            "name": "Steffen Dietz",
-            "email": "ich@steffendietz.de",
-            "homepage": "https://steffendietz.de"
-        }
-    ],
-    "require-dev": {
-        "league/flysystem-adapter-test-utilities": "^2.2",
-        "phpunit/phpunit": "^9.5"
     },
     "config": {
         "sort-packages": true
