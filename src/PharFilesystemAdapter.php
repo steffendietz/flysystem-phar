@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Steffendietz\Flysystem\Phar;
 
+use DirectoryIterator;
 use FilesystemIterator;
 use Generator;
 use IteratorIterator;
@@ -13,6 +14,8 @@ use League\Flysystem\FileAttributes;
 use League\Flysystem\FilesystemAdapter;
 use League\Flysystem\PathPrefixer;
 use League\Flysystem\UnableToCopyFile;
+use League\Flysystem\UnableToDeleteDirectory;
+use League\Flysystem\UnableToDeleteFile;
 use League\Flysystem\UnableToMoveFile;
 use League\Flysystem\UnableToReadFile;
 use League\Flysystem\UnableToRetrieveMetadata;
@@ -23,9 +26,11 @@ use League\MimeTypeDetection\MimeTypeDetector;
 use Phar;
 use PharData;
 use PharFileInfo;
+use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
+use SplFileInfo;
 
-class PharAdapter implements FilesystemAdapter
+class PharFilesystemAdapter implements FilesystemAdapter
 {
 
     protected string $fileName;
@@ -51,7 +56,9 @@ class PharAdapter implements FilesystemAdapter
 
     public function fileExists(string $path): bool
     {
-        return file_exists($this->prefixer->prefixPath($path));
+        $location = $this->prefixer->prefixPath($path);
+        clearstatcache(false, $location);
+        return is_file($location);
     }
 
     public function write(string $path, string $contents, Config $config): void
@@ -92,14 +99,39 @@ class PharAdapter implements FilesystemAdapter
 
     public function delete(string $path): void
     {
-        if ($this->fileExists($path)) {
-            $this->phar->delete($path);
+        $location = $this->prefixer->prefixPath($path);
+
+        if (!file_exists($location)) {
+            return;
+        }
+
+        error_clear_last();
+
+        if (!$this->phar->delete($path)) {
+            throw UnableToDeleteFile::atLocation($location, error_get_last()['message'] ?? '');
         }
     }
 
     public function deleteDirectory(string $path): void
     {
-        // TODO: Implement deleteDirectory() method.
+        $location = $this->prefixer->prefixPath($path);
+
+        if (!is_dir($location)) {
+            return;
+        }
+
+        $directoryContents = $this->recursiveGenerator($location, RecursiveIteratorIterator::CHILD_FIRST);
+
+        /** @var SplFileInfo $item */
+        foreach ($directoryContents as $item) {
+
+        }
+
+        unset($directoryContents);
+
+        if (!$this->phar->delete($path)) {
+            throw UnableToDeleteDirectory::atLocation($path, error_get_last()['message'] ?? '');
+        }
     }
 
     public function createDirectory(string $path, Config $config): void
@@ -168,13 +200,18 @@ class PharAdapter implements FilesystemAdapter
 
     public function listContents(string $path, bool $deep): iterable
     {
+        $location = $this->prefixer->prefixPath($path);
+
+        if (!is_dir($location)) {
+            return;
+        }
+
         /** @var PharFileInfo[] $iterator */
         $iterator = $deep === true
-            ? $this->recursiveGenerator($path)
-            : $this->flatGenerator($path);
+            ? $this->recursiveGenerator($location)
+            : $this->flatGenerator($location);
 
         foreach ($iterator as $fileInfo) {
-
             $path = $this->prefixer->stripPrefix($fileInfo->getPathname());
             $lastModified = $fileInfo->getMTime();
 
@@ -184,14 +221,14 @@ class PharAdapter implements FilesystemAdapter
         }
     }
 
-    private function recursiveGenerator(string $path): Generator
+    private function recursiveGenerator(string $location, int $mode = RecursiveIteratorIterator::SELF_FIRST): Generator
     {
-        yield from new RecursiveIteratorIterator($this->phar);
+        yield from new RecursiveIteratorIterator(new RecursiveDirectoryIterator($location, FilesystemIterator::SKIP_DOTS), $mode);
     }
 
-    private function flatGenerator(string $path): Generator
+    private function flatGenerator(string $location): Generator
     {
-        yield from new IteratorIterator($this->phar);
+        yield from new IteratorIterator(new DirectoryIterator($location));
     }
 
     public function move(string $source, string $destination, Config $config): void
@@ -200,6 +237,7 @@ class PharAdapter implements FilesystemAdapter
             throw UnableToMoveFile::fromLocationTo($source, $destination);
         }
 
+        $this->copy($source, $destination, $config);
         $this->delete($source);
     }
 
@@ -208,5 +246,8 @@ class PharAdapter implements FilesystemAdapter
         if (!$this->fileExists($source)) {
             throw UnableToCopyFile::fromLocationTo($source, $destination);
         }
+
+        $sourceStream = $this->readStream($source);
+        $this->writeStream($destination, $sourceStream, $config);
     }
 }
