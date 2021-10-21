@@ -4,3 +4,4 @@
 .phpunit.cache
 vendor
 composer.lock
+clover.xml
