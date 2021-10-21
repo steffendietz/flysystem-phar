@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Steffendietz\Flysystem\Phar;
 
+use DirectoryIterator;
 use FilesystemIterator;
 use Generator;
 use IteratorIterator;
@@ -13,25 +14,32 @@ use League\Flysystem\FileAttributes;
 use League\Flysystem\FilesystemAdapter;
 use League\Flysystem\PathPrefixer;
 use League\Flysystem\UnableToCopyFile;
+use League\Flysystem\UnableToDeleteDirectory;
+use League\Flysystem\UnableToDeleteFile;
 use League\Flysystem\UnableToMoveFile;
 use League\Flysystem\UnableToReadFile;
 use League\Flysystem\UnableToRetrieveMetadata;
 use League\Flysystem\UnableToSetVisibility;
 use League\Flysystem\UnableToWriteFile;
+use League\Flysystem\UnixVisibility\PortableVisibilityConverter;
+use League\Flysystem\UnixVisibility\VisibilityConverter;
 use League\MimeTypeDetection\FinfoMimeTypeDetector;
 use League\MimeTypeDetection\MimeTypeDetector;
 use Phar;
 use PharData;
 use PharFileInfo;
+use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
+use SplFileInfo;
 
-class PharAdapter implements FilesystemAdapter
+class PharFilesystemAdapter implements FilesystemAdapter
 {
 
     protected string $fileName;
     protected PharData $phar;
     protected PathPrefixer $prefixer;
     protected MimeTypeDetector $mimeTypeDetector;
+    protected VisibilityConverter $visibilityConverter;
 
     /**
      * PharAdapter constructor.
@@ -47,11 +55,15 @@ class PharAdapter implements FilesystemAdapter
         $this->fileName = $fileName;
         $this->prefixer = new PathPrefixer('phar://' . $this->fileName . '/');
         $this->mimeTypeDetector = $mimeTypeDetector ?? new FinfoMimeTypeDetector();
+        $this->visibilityConverter = new PortableVisibilityConverter();
     }
 
     public function fileExists(string $path): bool
     {
-        return file_exists($this->prefixer->prefixPath($path));
+        if (($fileInfo = $this->getPharFileInfo($path)) !== null) {
+            return $fileInfo->isFile();
+        }
+        return false;
     }
 
     public function write(string $path, string $contents, Config $config): void
@@ -61,6 +73,10 @@ class PharAdapter implements FilesystemAdapter
         }
 
         $this->phar->addFromString($path, $contents);
+
+        if ($visibility = $config->get(Config::OPTION_VISIBILITY)) {
+            $this->setVisibility($path, (string)$visibility);
+        }
     }
 
     public function writeStream(string $path, $contents, Config $config): void
@@ -92,14 +108,42 @@ class PharAdapter implements FilesystemAdapter
 
     public function delete(string $path): void
     {
-        if ($this->fileExists($path)) {
-            $this->phar->delete($path);
+        $fileInfo = $this->getPharFileInfo($path);
+
+        if ($fileInfo === null) {
+            return;
+        }
+
+        if (!$this->phar->delete($path)) {
+            throw UnableToDeleteFile::atLocation($path, error_get_last()['message'] ?? '');
         }
     }
 
     public function deleteDirectory(string $path): void
     {
-        // TODO: Implement deleteDirectory() method.
+        $fileInfo = $this->getPharFileInfo($path);
+
+        if ($fileInfo === null || !$fileInfo->isDir()) {
+            return;
+        }
+
+        $directoryContents = $this->recursiveGenerator(
+            $this->prefixer->prefixPath($path),
+            RecursiveIteratorIterator::CHILD_FIRST
+        );
+
+        /** @var SplFileInfo $item */
+        foreach ($directoryContents as $item) {
+            if ($item->isFile()) {
+                $this->phar->delete($this->prefixer->stripPrefix($item->getPathname()));
+            }
+        }
+
+        $fileInfo = $this->getPharFileInfo($path);
+
+        if ($fileInfo !== null && $fileInfo->isDir() && !$this->phar->delete($path)) {
+            throw UnableToDeleteDirectory::atLocation($path, error_get_last()['message'] ?? '');
+        }
     }
 
     public function createDirectory(string $path, Config $config): void
@@ -112,6 +156,14 @@ class PharAdapter implements FilesystemAdapter
         if (!$this->fileExists($path)) {
             throw UnableToSetVisibility::atLocation($path);
         }
+
+        $fileInfo = $this->getPharFileInfo($path);
+
+        $permissions = $fileInfo->isDir()
+            ? $this->visibilityConverter->forDirectory($visibility)
+            : $this->visibilityConverter->forFile($visibility);
+
+        $fileInfo->chmod($permissions);
     }
 
     public function visibility(string $path): FileAttributes
@@ -120,13 +172,23 @@ class PharAdapter implements FilesystemAdapter
             throw UnableToRetrieveMetadata::visibility($path);
         }
 
-        return new FileAttributes($path);
+        $permissions = octdec(substr(sprintf('%o', $this->getPharFileInfo($path)->getPerms()), -4));
+
+        $visibility = $this->visibilityConverter->inverseForFile($permissions);
+
+        return new FileAttributes($path, null, $visibility);
     }
 
     public function mimeType(string $path): FileAttributes
     {
         if (!$this->fileExists($path)) {
             throw UnableToRetrieveMetadata::mimeType($path);
+        }
+
+        $fileInfo = $this->getPharFileInfo($path);
+
+        if ($fileInfo->isDir()) {
+            throw UnableToRetrieveMetadata::mimeType($path, 'directory');
         }
 
         $mimeType = $this->mimeTypeDetector->detectMimeTypeFromFile($this->prefixer->prefixPath($path));
@@ -144,10 +206,7 @@ class PharAdapter implements FilesystemAdapter
             throw UnableToRetrieveMetadata::lastModified($path);
         }
 
-        /** @var PharFileInfo $fileInfo */
-        $fileInfo = $this->phar->offsetGet($path);
-
-        return new FileAttributes($path, null, null, $fileInfo->getMTime());
+        return new FileAttributes($path, null, null, $this->getPharFileInfo($path)->getMTime());
     }
 
     public function fileSize(string $path): FileAttributes
@@ -156,8 +215,7 @@ class PharAdapter implements FilesystemAdapter
             throw UnableToRetrieveMetadata::fileSize($path);
         }
 
-        /** @var PharFileInfo $fileInfo */
-        $fileInfo = $this->phar->offsetGet($path);
+        $fileInfo = $this->getPharFileInfo($path);
 
         if ($fileInfo->isDir()) {
             throw UnableToRetrieveMetadata::fileSize($path, 'directory');
@@ -168,13 +226,18 @@ class PharAdapter implements FilesystemAdapter
 
     public function listContents(string $path, bool $deep): iterable
     {
+        $location = $this->prefixer->prefixPath($path);
+
+        if (!is_dir($location)) {
+            return;
+        }
+
         /** @var PharFileInfo[] $iterator */
         $iterator = $deep === true
-            ? $this->recursiveGenerator($path)
-            : $this->flatGenerator($path);
+            ? $this->recursiveGenerator($location)
+            : $this->flatGenerator($location);
 
         foreach ($iterator as $fileInfo) {
-
             $path = $this->prefixer->stripPrefix($fileInfo->getPathname());
             $lastModified = $fileInfo->getMTime();
 
@@ -184,14 +247,16 @@ class PharAdapter implements FilesystemAdapter
         }
     }
 
-    private function recursiveGenerator(string $path): Generator
+    private function recursiveGenerator(string $location, int $mode = RecursiveIteratorIterator::SELF_FIRST): Generator
     {
-        yield from new RecursiveIteratorIterator($this->phar);
+        yield from new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($location, FilesystemIterator::SKIP_DOTS), $mode
+        );
     }
 
-    private function flatGenerator(string $path): Generator
+    private function flatGenerator(string $location): Generator
     {
-        yield from new IteratorIterator($this->phar);
+        yield from new IteratorIterator(new DirectoryIterator($location));
     }
 
     public function move(string $source, string $destination, Config $config): void
@@ -200,6 +265,7 @@ class PharAdapter implements FilesystemAdapter
             throw UnableToMoveFile::fromLocationTo($source, $destination);
         }
 
+        $this->copy($source, $destination, $config);
         $this->delete($source);
     }
 
@@ -208,5 +274,16 @@ class PharAdapter implements FilesystemAdapter
         if (!$this->fileExists($source)) {
             throw UnableToCopyFile::fromLocationTo($source, $destination);
         }
+
+        $sourceStream = $this->readStream($source);
+        $this->writeStream($destination, $sourceStream, $config);
+    }
+
+    private function getPharFileInfo(string $path): ?PharFileInfo
+    {
+        if (isset($this->phar[$path])) {
+            return $this->phar[$path];
+        }
+        return null;
     }
 }
