@@ -21,6 +21,8 @@ use League\Flysystem\UnableToReadFile;
 use League\Flysystem\UnableToRetrieveMetadata;
 use League\Flysystem\UnableToSetVisibility;
 use League\Flysystem\UnableToWriteFile;
+use League\Flysystem\UnixVisibility\PortableVisibilityConverter;
+use League\Flysystem\UnixVisibility\VisibilityConverter;
 use League\MimeTypeDetection\FinfoMimeTypeDetector;
 use League\MimeTypeDetection\MimeTypeDetector;
 use Phar;
@@ -37,6 +39,7 @@ class PharFilesystemAdapter implements FilesystemAdapter
     protected PharData $phar;
     protected PathPrefixer $prefixer;
     protected MimeTypeDetector $mimeTypeDetector;
+    protected VisibilityConverter $visibilityConverter;
 
     /**
      * PharAdapter constructor.
@@ -52,13 +55,15 @@ class PharFilesystemAdapter implements FilesystemAdapter
         $this->fileName = $fileName;
         $this->prefixer = new PathPrefixer('phar://' . $this->fileName . '/');
         $this->mimeTypeDetector = $mimeTypeDetector ?? new FinfoMimeTypeDetector();
+        $this->visibilityConverter = new PortableVisibilityConverter();
     }
 
     public function fileExists(string $path): bool
     {
-        $location = $this->prefixer->prefixPath($path);
-        clearstatcache(false, $location);
-        return is_file($location);
+        if (($fileInfo = $this->getPharFileInfo($path)) !== null) {
+            return $fileInfo->isFile();
+        }
+        return false;
     }
 
     public function write(string $path, string $contents, Config $config): void
@@ -68,6 +73,10 @@ class PharFilesystemAdapter implements FilesystemAdapter
         }
 
         $this->phar->addFromString($path, $contents);
+
+        if ($visibility = $config->get(Config::OPTION_VISIBILITY)) {
+            $this->setVisibility($path, (string)$visibility);
+        }
     }
 
     public function writeStream(string $path, $contents, Config $config): void
@@ -99,37 +108,40 @@ class PharFilesystemAdapter implements FilesystemAdapter
 
     public function delete(string $path): void
     {
-        $location = $this->prefixer->prefixPath($path);
+        $fileInfo = $this->getPharFileInfo($path);
 
-        if (!file_exists($location)) {
+        if ($fileInfo === null) {
             return;
         }
 
-        error_clear_last();
-
         if (!$this->phar->delete($path)) {
-            throw UnableToDeleteFile::atLocation($location, error_get_last()['message'] ?? '');
+            throw UnableToDeleteFile::atLocation($path, error_get_last()['message'] ?? '');
         }
     }
 
     public function deleteDirectory(string $path): void
     {
-        $location = $this->prefixer->prefixPath($path);
+        $fileInfo = $this->getPharFileInfo($path);
 
-        if (!is_dir($location)) {
+        if ($fileInfo === null || !$fileInfo->isDir()) {
             return;
         }
 
-        $directoryContents = $this->recursiveGenerator($location, RecursiveIteratorIterator::CHILD_FIRST);
+        $directoryContents = $this->recursiveGenerator(
+            $this->prefixer->prefixPath($path),
+            RecursiveIteratorIterator::CHILD_FIRST
+        );
 
         /** @var SplFileInfo $item */
         foreach ($directoryContents as $item) {
-
+            if ($item->isFile()) {
+                $this->phar->delete($this->prefixer->stripPrefix($item->getPathname()));
+            }
         }
 
-        unset($directoryContents);
+        $fileInfo = $this->getPharFileInfo($path);
 
-        if (!$this->phar->delete($path)) {
+        if ($fileInfo !== null && $fileInfo->isDir() && !$this->phar->delete($path)) {
             throw UnableToDeleteDirectory::atLocation($path, error_get_last()['message'] ?? '');
         }
     }
@@ -144,6 +156,14 @@ class PharFilesystemAdapter implements FilesystemAdapter
         if (!$this->fileExists($path)) {
             throw UnableToSetVisibility::atLocation($path);
         }
+
+        $fileInfo = $this->getPharFileInfo($path);
+
+        $permissions = $fileInfo->isDir()
+            ? $this->visibilityConverter->forDirectory($visibility)
+            : $this->visibilityConverter->forFile($visibility);
+
+        $fileInfo->chmod($permissions);
     }
 
     public function visibility(string $path): FileAttributes
@@ -152,13 +172,23 @@ class PharFilesystemAdapter implements FilesystemAdapter
             throw UnableToRetrieveMetadata::visibility($path);
         }
 
-        return new FileAttributes($path);
+        $permissions = octdec(substr(sprintf('%o', $this->getPharFileInfo($path)->getPerms()), -4));
+
+        $visibility = $this->visibilityConverter->inverseForFile($permissions);
+
+        return new FileAttributes($path, null, $visibility);
     }
 
     public function mimeType(string $path): FileAttributes
     {
         if (!$this->fileExists($path)) {
             throw UnableToRetrieveMetadata::mimeType($path);
+        }
+
+        $fileInfo = $this->getPharFileInfo($path);
+
+        if ($fileInfo->isDir()) {
+            throw UnableToRetrieveMetadata::mimeType($path, 'directory');
         }
 
         $mimeType = $this->mimeTypeDetector->detectMimeTypeFromFile($this->prefixer->prefixPath($path));
@@ -176,10 +206,7 @@ class PharFilesystemAdapter implements FilesystemAdapter
             throw UnableToRetrieveMetadata::lastModified($path);
         }
 
-        /** @var PharFileInfo $fileInfo */
-        $fileInfo = $this->phar->offsetGet($path);
-
-        return new FileAttributes($path, null, null, $fileInfo->getMTime());
+        return new FileAttributes($path, null, null, $this->getPharFileInfo($path)->getMTime());
     }
 
     public function fileSize(string $path): FileAttributes
@@ -188,8 +215,7 @@ class PharFilesystemAdapter implements FilesystemAdapter
             throw UnableToRetrieveMetadata::fileSize($path);
         }
 
-        /** @var PharFileInfo $fileInfo */
-        $fileInfo = $this->phar->offsetGet($path);
+        $fileInfo = $this->getPharFileInfo($path);
 
         if ($fileInfo->isDir()) {
             throw UnableToRetrieveMetadata::fileSize($path, 'directory');
@@ -223,7 +249,9 @@ class PharFilesystemAdapter implements FilesystemAdapter
 
     private function recursiveGenerator(string $location, int $mode = RecursiveIteratorIterator::SELF_FIRST): Generator
     {
-        yield from new RecursiveIteratorIterator(new RecursiveDirectoryIterator($location, FilesystemIterator::SKIP_DOTS), $mode);
+        yield from new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($location, FilesystemIterator::SKIP_DOTS), $mode
+        );
     }
 
     private function flatGenerator(string $location): Generator
@@ -249,5 +277,13 @@ class PharFilesystemAdapter implements FilesystemAdapter
 
         $sourceStream = $this->readStream($source);
         $this->writeStream($destination, $sourceStream, $config);
+    }
+
+    private function getPharFileInfo(string $path): ?PharFileInfo
+    {
+        if (isset($this->phar[$path])) {
+            return $this->phar[$path];
+        }
+        return null;
     }
 }
