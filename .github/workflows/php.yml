@@ -58,3 +58,10 @@ jobs:
 
       - name: "Tests"
         run: "vendor/bin/phpunit --coverage-clover=clover.xml --coverage-text"
+
+      - name: "Coverage processing"
+        uses: steffendietz/clover-to-shieldsio-json-action@v1.0
+        with:
+          path-to-clover: "clover.xml"
+          path-to-json: "build/shieldsio-coverage.json"
+          style: "square-flat"
