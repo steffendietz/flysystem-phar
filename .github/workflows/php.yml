@@ -65,7 +65,7 @@ jobs:
         with:
           path-to-clover: "clover.xml"
           path-to-json: "build/shieldsio-coverage.json"
-          style: "square-flat"
+          style: "flat-square"
 
       - name: "Deploy coverage"
         if: ${{ github.ref == 'refs/heads/master' && matrix.dependencies == 'highest' &&  matrix.php-version == '8.0' }}
